@@ -1,91 +1,128 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM ========================================
-REM CONFIGURAÇÕES
-REM ========================================
-
-REM Caminho da pasta "projeto-build-totaldocs-repository-frontend" (onde está este .bat)
-set ROOT_DIR=%~dp0
-
-REM Caminhos relativos
-set FRONTEND_DIR=%ROOT_DIR%totaldocs-repository-frontend
-set NGINX_DIR=%ROOT_DIR%projeto-nginx - repositorio
-
-REM Arquivo de propriedades
-set PROPERTIES_FILE=%ROOT_DIR%build.properties
-
-REM ========================================
-REM LER HASH DO ARQUIVO build.properties
-REM Exemplo do arquivo:
-REM   GIT_HASH=0239bc770d74f1642c8e80fb7aeb4e9e257e4604
-REM ========================================
-
-set GIT_HASH=
-for /f "tokens=1,2 delims==" %%A in (%PROPERTIES_FILE%) do (
-    if "%%A"=="GIT_HASH" set GIT_HASH=%%B
+:: ========================================
+:: Carregar variáveis do build.properties
+:: ========================================
+for /f "tokens=1,2 delims==" %%a in (build.properties) do (
+    set "%%a=%%b"
 )
 
-if "%GIT_HASH%"=="" (
-    echo [ERRO] GIT_HASH nao encontrado em %PROPERTIES_FILE%
+:: ========================================
+:: Normalizar ROOT_PATH (resolvendo .. ou caminhos relativos)
+:: ========================================
+pushd "%~dp0%ROOT_PATH%" >nul
+set "ROOT_PATH=%cd%"
+popd >nul
+
+:: Definir demais caminhos absolutos
+set "FRONTEND_PATH=%ROOT_PATH%\%FRONTEND_DIR%"
+set "NGINX_PATH=%ROOT_PATH%\%NGINX_DIR%"
+set "ACOPLADO_PATH=%FRONTEND_PATH%\node_modules\%ACOPLADO_DIR%"
+
+echo ========================================
+echo [INFO] Iniciando build
+echo ROOT_PATH    = %ROOT_PATH%
+echo FRONTEND_DIR = %FRONTEND_DIR%
+echo NGINX_DIR    = %NGINX_DIR%
+echo ACOPLADO_DIR = %ACOPLADO_DIR%
+echo GIT_HASH     = %GIT_HASH%
+echo FRONTEND_PATH= %FRONTEND_PATH%
+echo NGINX_PATH   = %NGINX_PATH%
+echo ACOPLADO_PATH= %ACOPLADO_PATH%
+echo ========================================
+
+:: ========================================
+:: 1. Atualizar projeto acoplado
+:: ========================================
+if exist "%ACOPLADO_PATH%" (
+    echo [INFO] Removendo projeto acoplado antigo...
+    rmdir /s /q "%ACOPLADO_PATH%"
+)
+
+echo [INFO] Instalando projeto acoplado do GitHub...
+cd /d "%FRONTEND_PATH%"
+call npm install git+https://github.com/kevynsantos-sirius/%ACOPLADO_DIR%#%GIT_HASH%
+if errorlevel 1 (
+    echo [ERRO] Falha no npm install do projeto acoplado
     exit /b 1
 )
 
-echo ========================================
-echo Usando hash: %GIT_HASH%
-echo ========================================
-
-REM ========================================
-REM 1. REMOVER totaldocs-oauth2-handler DO NODE_MODULES
-REM ========================================
-echo [INFO] Removendo node_modules/totaldocs-oauth2-handler...
-rmdir /s /q "%FRONTEND_DIR%\node_modules\totaldocs-oauth2-handler"
-
-REM ========================================
-REM 2. INSTALAR VERSÃO DO REPOSITORIO NO NODE_MODULES
-REM ========================================
-cd /d "%FRONTEND_DIR%"
-echo [INFO] Instalando totaldocs-oauth2-handler com hash %GIT_HASH%...
-call npm install git+https://github.com/kevynsantos-sirius/totaldocs-oauth2-handler#%GIT_HASH%
-
-REM ========================================
-REM 3. BUILD DO totaldocs-oauth2-handler
-REM ========================================
-cd node_modules\totaldocs-oauth2-handler
+cd /d "%ACOPLADO_PATH%"
 call npm install
+if errorlevel 1 (
+    echo [ERRO] Falha no npm install dentro do projeto acoplado
+    exit /b 1
+)
+
 call npx tsc
-call npm run build
-cd /d "%FRONTEND_DIR%"
+if errorlevel 1 (
+    echo [ERRO] Falha no tsc do projeto acoplado
+    exit /b 1
+)
 
-REM ========================================
-REM 4. BUILD DO totaldocs-repository-frontend
-REM ========================================
-echo [INFO] Rodando npm install e build no frontend principal...
+call npm run build
+if errorlevel 1 (
+    echo [ERRO] Falha no build do projeto acoplado
+    exit /b 1
+)
+cd /d "%FRONTEND_PATH%"
+
+:: ========================================
+:: 2. Build do frontend principal
+:: ========================================
+echo [INFO] Instalando dependências do frontend...
 call npm install
+if errorlevel 1 (
+    echo [ERRO] Falha no npm install do frontend
+    exit /b 1
+)
+
+echo [INFO] Gerando build do frontend...
 call npm run build
+if errorlevel 1 (
+    echo [ERRO] Falha no npm run build do frontend
+    exit /b 1
+)
 
-REM ========================================
-REM 5. COPIAR DIST PARA NGINX
-REM ========================================
-echo [INFO] Copiando dist para %NGINX_DIR%\frontend\dist\totaldocs-repository-frontend...
-xcopy /s /e /y "%FRONTEND_DIR%\dist" "%NGINX_DIR%\frontend\dist\totaldocs-repository-frontend"
+:: ========================================
+:: 3. Copiar build para o projeto nginx
+:: ========================================
+echo [INFO] Verificando pasta dist em "%FRONTEND_PATH%\dist"...
+if not exist "%FRONTEND_PATH%\dist" (
+    echo [ERRO] Pasta dist não encontrada em "%FRONTEND_PATH%\dist"
+    exit /b 1
+)
 
-REM ========================================
-REM 6. REINICIAR CONTAINER DOCKER
-REM ========================================
+echo [INFO] Copiando dist para "%NGINX_PATH%\frontend\dist\%FRONTEND_DIR%"...
+xcopy /s /e /y "%FRONTEND_PATH%\dist" "%NGINX_PATH%\frontend\dist\%FRONTEND_DIR%\"
+if errorlevel 1 (
+    echo [ERRO] Falha ao copiar arquivos dist
+    exit /b 1
+)
+
+:: ========================================
+:: 4. Restart do Docker
+:: ========================================
 echo [INFO] Removendo container antigo...
 docker rm -f nginx-react-struts
 
 echo [INFO] Subindo novo container...
-cd /d "%NGINX_DIR%"
+cd /d "%NGINX_PATH%"
 docker run --name nginx-react-struts ^
--v "%cd%\frontend\dist:/usr/share/nginx/html" ^
--v "%cd%\nginx.conf:/etc/nginx/nginx.conf" ^
+-v "%NGINX_PATH%\frontend\dist:/usr/share/nginx/html" ^
+-v "%NGINX_PATH%\nginx.conf:/etc/nginx/nginx.conf" ^
 -p 80:80 -d nginx
+if errorlevel 1 (
+    echo [ERRO] Falha ao subir container docker
+    exit /b 1
+)
 
+:: ========================================
+:: 5. Finalização
+:: ========================================
 echo ========================================
-echo [SUCESSO] Build e deploy finalizado!
+echo [SUCESSO] Build e deploy finalizado
 echo ========================================
-
-endlocal
 pause
+exit /b 0
